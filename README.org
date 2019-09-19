@@ -1,0 +1,978 @@
+#+TITLE: Endpoints: For The Web!
+
+A way to define and dispatch on endpoints: For The Web!
+
+* Overview 
+
+Essentially, a no nonsense way to define functions for URLs, and a ~mux~ that
+takes care of them.
+
+First things first. 
+
+#+begin_src gerbil  
+  (define-endpoint test "^/([^-]*)-?test/?(.*)")
+#+end_src
+
+What this does is defines an endpoint so that, when a request comes it, the
+pregexp is matched. If it matches, any regexp groups are passed as arguments to
+the function it calls.
+
+The functions it may call are based on the name, in this case ~test~, and the
+method the server uses to get the page. So, to start with, ~test/GET~.
+
+#+begin_src gerbil  
+  (def (test/GET prefix postfix)
+    (http-response-write* (string-append prefix " test " postfix)))
+#+end_src
+
+Wait, ~http-response-write*~? What is that? ~:drewc/ftw/endpoint~ exports
+~current-http-request~ and ~current-http-response~. That allows our functions to
+be under a request-response cycle without specific names unless needed.
+
+#+begin_src gerbil  
+  (def (http-response-write*
+        body
+        status: (code 200)
+        headers: (headers '(("Content-Type" . "text/plain")))
+        response: (res (current-http-response)))
+    (http-response-write res code headers body))
+#+end_src
+
+Let's test it out! We also export ~current-http-mux~, which is where endpoints
+are added/defined. 
+
+#+begin_src gerbil  
+  (def server-address
+    "127.0.0.1:6666")
+
+  (def server-url
+    (string-append "http://" server-address))
+
+
+  (def httpd (start-http-server! server-address mux: (current-http-mux)))
+#+end_src
+
+#+begin_src gerbil
+ (let (req (http-get (string-append server-url "/foo-test/bar?baz=bat")))
+ (check (request-status req) => 200)
+ (check (request-text req) => "foo test bar"))
+#+end_src
+#+begin_src gerbil 
+    (import  :drewc/ftw/endpoint/struct 
+             :drewc/ftw/endpoint/mux
+             :std/format :std/test 
+             :std/net/httpd)
+    (export define-endpoint current-http-mux current-http-request current-http-response)bg
+
+    (def current-http-mux
+      (make-parameter (make-endpoint-http-mux)))
+
+    (def (add-endpoint! endpoint to: (to (current-http-mux)))
+      (add-endpoint-to-http-mux! to endpoint))
+
+    (defrules define-endpoint ()
+      ((_ name match)
+       (add-endpoint! (make-endpoint 'name match)))
+      ((_ name match args ... )
+       (add-endpoint! (make-endpoint 'name match args ...)))
+      ((_ name match mux: mux args ... )
+       (add-endpoint! (make-endpoint 'name match args ...)
+                      to: mux)))
+
+    (def (http-response-write*
+          body
+          status: (code 200)
+          headers: (headers '(("Content-Type" . "text/plain")))
+          response: (res (current-http-response)))
+      (http-response-write res code headers body))
+
+
+    (def (test/GET . args)
+      (http-response-write*
+       (with-output-to-string
+         (lambda () (map displayln args)))))
+
+    (import :std/net/httpd  :std/test 
+            :std/net/request(only-in :gerbil/gambit/exceptions display-exception))
+
+
+    (def (test/get pre post)
+      (respond* (string-append pre post)))
+
+    (def foo #f)
+    (def bar #f)
+
+    (def endpoint-test
+      (test-suite
+        "test :drewc/ftw/endpoint"
+
+        (def server-address
+          "127.0.0.1:9666")
+
+        (display server-address)
+
+        (def server-url
+          (string-append "http://" server-address))
+
+
+
+
+        (def httpd
+          (start-http-server! server-address mux: (current-http-mux)))
+
+        (set! foo httpd)
+
+
+
+       ; (stop-http-server! httpd)
+
+        ))
+
+
+
+
+#+end_src
+
+
+* Files 
+
+** endpoint.ss
+
+#+begin_src gerbil :tangle "endpoint.ss"
+  (import  :drewc/ftw/endpoint/struct 
+           :drewc/ftw/endpoint/mux
+           :std/format :std/test 
+           :std/net/httpd)
+  (export define-endpoint add-endpoint! 
+          current-http-mux current-http-request current-http-response)
+
+  (def current-http-mux
+    (make-parameter (make-endpoint-http-mux)))
+
+  (def (add-endpoint! endpoint to: (to (current-http-mux)))
+    (add-endpoint-to-http-mux! to endpoint))
+
+  (defrules define-endpoint ()
+    ((_ name match)
+     (add-endpoint! (make-endpoint 'name match)))
+    ((_ name match args ... )
+     (add-endpoint! (make-endpoint 'name match args ...)))
+    ((_ name match mux: mux args ... )
+     (add-endpoint! (make-endpoint 'name match args ...)
+                    to: mux)))
+#+end_src
+
+** endpoint/struct.ss 
+
+#+begin_src gerbil :tangle "endpoint/struct.ss"
+  (import ;; :std/net/httpd/mux 
+          :std/net/httpd ;; :std/misc/sync
+          :std/pregexp :gerbil/expander
+          :std/sugar :std/format :std/srfi/95 :std/iter :std/error
+          :gerbil/gambit/exceptions)
+  (export #t)
+
+  (defstruct endpoint (name match priority
+                            context parameters predicate function)
+    constructor: :init!)
+
+  (defmethod {:init! endpoint}
+    (lambda (self name match
+             priority: (priority 10)
+             predicate: (test endpoint-request-function-parameters)
+             parameters: (parameters #t)
+             function: (function endpoint-request-function) 
+             context: (context (gx#current-expander-context)))
+      (struct-instance-init! self name match priority
+                             context parameters test function)))
+
+  (defstruct (endpoint-error <error>) (endpoint))
+
+  (def (raise-endpoint-error endpoint what . thingies)
+    (raise (make-endpoint-error what thingies (endpoint-name endpoint) endpoint)))
+
+  (defstruct (endpoint-request-function-not-found endpoint-error) ())
+
+  (def (raise-endpoint-request-function-not-found endpoint what . thingies)
+    (raise (make-endpoint-request-function-not-found what thingies (endpoint-name endpoint) endpoint)))
+
+  (def (endpoint-request-function endpoint request)
+      (let* ((context (endpoint-context endpoint))
+             (fname (string->symbol
+                     (string-append
+                      (symbol->string (endpoint-name endpoint))
+                      "/"
+                      (symbol->string (http-request-method request)))))
+             (exception #f)
+             (bound (try (##eval fname context) (catch (e) (set! exception e) #f)))
+             (proc (if (and bound (procedure? bound))
+                     bound
+                     #f)))
+
+        (cond (proc proc)
+              (bound
+               (raise-endpoint-request-function-not-found
+                endpoint
+                (format "~A is not a procedure. Context: ~A"
+                        fname (expander-context-id context))
+                fname))
+              ((not bound)
+               (raise-endpoint-request-function-not-found
+                endpoint
+                (format "~A is not bound in context: ~A. ~A"
+                        fname (expander-context-id context)
+                        (if exception (with-output-to-string (cut display-exception
+                                                               exception))
+                            ""))
+                fname)))))
+
+  (def (endpoint-request-function-parameters endpoint request)
+    (let ((groups (pregexp-match (endpoint-match endpoint)
+                                (http-request-path request))))
+      (if groups
+        (cdr groups)
+        #f)))
+
+  (def (make-endpoint-dispatch-function endpoint)
+    (let* ((test (endpoint-predicate endpoint))
+           (test (cut test endpoint <>))
+           (params (endpoint-parameters endpoint))
+           (param-fn (case params
+                       ((#t) test)
+                       ((#f) (lambda _ '()))
+                       (else
+                        (if (procedure? params)
+                          (cut params endpoint <>)
+                          (lambda _ params)))))
+           (dispatch-to-function (cut (endpoint-function endpoint) endpoint <>)))
+      (lambda (request)
+        (let (results (test request))
+          (if (not results)
+            #f
+            (begin0 #t
+              (let (args (if (eq? #t params)
+                           results
+                           (param-fn request)))
+                (apply (dispatch-to-function request) args))))))))
+#+end_src
+
+** endpoint/mux.ss 
+
+#+begin_src gerbil :tangle "endpoint/mux.ss"
+  (import :drewc/ftw/endpoint/struct 
+          :std/net/httpd/mux :std/net/httpd :std/misc/sync
+          :std/sugar :std/srfi/95 :std/iter :std/format
+          :gerbil/gambit/exceptions :gerbil/expander)
+  (export #t)
+
+  (defstruct endpoint-http-mux (endpoints queue)
+    constructor: :init!)
+
+  (defmethod {:init! endpoint-http-mux}
+    (lambda (self)
+      (struct-instance-init! self (make-sync-hash (make-hash-table)) '())))
+
+  (def (endpoint-hash endpoint)
+    (string->symbol (string-append
+                     (symbol->string
+                      (expander-context-id (endpoint-context endpoint)))
+                     "::"
+                     (with-output-to-string
+                       (cut display (endpoint-name endpoint))))))
+
+  (def (make-endpoint-http-mux-queue mux)
+    (let (q (sync-hash-do (endpoint-http-mux-endpoints mux)
+                          (lambda (t) (for/collect ((values k v) (in-hash t)) v))))
+      (map make-endpoint-dispatch-function (sort q < endpoint-priority))))
+
+  (def (add-endpoint-to-http-mux! mux endpoint)
+    (let (hash (endpoint-hash endpoint))
+      (begin0 hash (sync-hash-put! (endpoint-http-mux-endpoints mux)
+                    hash 
+                    endpoint)
+              (set! (endpoint-http-mux-queue mux) (make-endpoint-http-mux-queue mux)))))
+
+  (def current-http-request
+    (make-parameter #f))
+
+  (def current-http-response
+    (make-parameter #f))
+
+  (def (endpoint-http-mux-request-handler mux)
+    (lambda (req res)
+      (parameterize ((current-http-request req)
+                     (current-http-response res))
+        (try 
+         (let handle-request ((q (endpoint-http-mux-queue mux)))
+           (if (null? q)
+             (error "Cannot find handler for " (http-request-path req))
+             (let (dispatched? ((car q) req))
+               (or dispatched? (handle-request (cdr q))))))
+        (catch (e)
+          (http-response-write
+           res 500 '() (format "Endpoint Error: ~A"
+                           (with-output-to-string (cut display-exception e)))))))))
+
+  (defmethod {get-handler endpoint-http-mux}
+    (lambda (mux . _) (endpoint-http-mux-request-handler mux)))
+
+  (defmethod {put-handler! endpoint-http-mux}
+    (lambda (mux host path handler)
+      (if (procedure? handler)
+        (add-endpoint-to-http-mux!
+         mux (make-endpoint (string->symbol path) path
+                            function: (lambda ()
+                                        (handler (current-http-request)
+                                                 (current-http-response)))
+                            parameters: '()
+                            predicate: (lambda (req) (eqv? path
+                                                      (http-request-path (current-http-request))))))
+        (add-endpoint-to-http-mux! mux handler))))
+
+
+#+end_src
+#+begin_src gerbil 
+  (import :std/net/httpd/mux :std/net/httpd :std/misc/sync :std/pregexp :gerbil/expander :std/sugar :std/format :std/srfi/95 :std/iter)
+
+
+  (defstruct endpoint (name match priority
+                            context groups test function)
+    constructor: :init!)
+
+  (defmethod {:init! endpoint}
+    (lambda (self name match
+             priority: (priority 10)
+             function: (function endpoint-request-function)
+             parameters: (parameters endpoint-request-function-parameters)
+             context: (context (gx#current-expander-context))
+             test: (test #t))
+      (struct-instance-init! self name match priority
+                             context parameters test function)))
+
+  (def (endpoint-request-function endpoint request)
+      (let* ((context (endpoint-context endpoint))
+             (fname (string->symbol
+                     (string-append
+                      (symbol->string (endpoint-name endpoint))
+                      "/"
+                      (symbol->string (http-request-method request)))))
+             (exception #f)
+             (bound (try (##eval fname context) (catch (e) (set! exception e) #f)))
+             (proc (if (and bound (procedure? bound))
+                     bound
+                     #f)))
+
+        (cond (proc proc)
+              (bound (error (format "~A is not a procedure. Context: ~A"
+                                     fname (expander-context-id context))))
+              ((not bound)
+               (error (format "~A is not bound in context: ~A. ~A"
+                              fname (expander-context-id context)
+                              (if exception (with-output-to-string (cut display-exception
+                                                                     exception))
+                                  "")))))))
+
+  (def (endpoint-request-function-parameters endpoint request)
+    (let (groups (pregexp-match (endpoint-match endpoint)
+                                (http-request-path request)))
+      (if groups
+        (cdr groups)
+        #f)))
+
+  (def (make-endpoint-dispatch-function endpoint)
+    (let* ((test (endpoint-test endpoint))
+           (params-as-test? (eq? test #t))
+           (params (cut endpoint-request-function-parameters endpoint <>))
+           (function (cut endpoint-request-function endpoint <>))
+           (test? (if params-as-test?
+                    params
+                    test)))
+      (lambda (request)
+        (let* ((results (test? request))
+               (dispatch-to (when results (function request)))
+               (args (when results
+                       (if params-as-test?
+                         results
+                         (params results)))))
+          (if (not results)
+            #f
+            (begin0 #t
+              (apply dispatch-to args)))))))
+
+
+
+  (defstruct endpoint-http-mux (endpoints queue)
+    constructor: :init!)
+
+  (defmethod {:init! endpoint-http-mux}
+    (lambda (self)
+      (struct-instance-init! self (make-sync-hash (make-hash-table)) '())))
+
+
+  (def current-http-request
+    (make-parameter #f))
+
+  (def current-http-response
+    (make-parameter #f))
+
+  (def (endpoint-hash endpoint)
+    (string->symbol (string-append
+                     (symbol->string
+                      (expander-context-id (endpoint-context endpoint)))
+                     "::"
+                     (with-output-to-string
+                       (cut display (endpoint-name endpoint))))))
+
+  (def (make-endpoint-http-mux-queue mux)
+    (let (q (sync-hash-do (endpoint-http-mux-endpoints mux)
+                          (lambda (t) (for/collect ((values k v) (in-hash t)) v))))
+      (map make-endpoint-dispatch-function (sort q < endpoint-priority))))
+
+  (def (add-endpoint-to-http-mux! mux endpoint)
+    (let (hash (endpoint-hash endpoint))
+      (begin0 hash (sync-hash-put! (endpoint-http-mux-endpoints mux)
+                    hash 
+                    endpoint)
+              (set! (endpoint-http-mux-queue mux) (make-endpoint-http-mux-queue mux)))))
+
+  (def (endpoint-http-mux-request-handler mux)
+    (lambda (req res)
+      (parameterize ((current-http-request req)
+                     (current-http-response res))
+        (try 
+         (let handle-request ((q (endpoint-http-mux-queue mux)))
+           (if (null? q)
+             (error "Cannot find handler for " (http-request-path req))
+             (let (dispatched? ((car q) req))
+               (or dispatched? (handle-request (cdr q))))))
+        (catch (e)
+          (http-response-write
+           res 500 (format "Endpoint Error: ~A"
+                           (with-output-to-string (cut display-exception e)))))))))
+
+  (defmethod {get-handler endpoint-http-mux}
+    (lambda (mux . _) (endpoint-http-mux-request-handler mux)))
+
+  (defmethod {put-handler! endpoint-http-mux}
+    (lambda (mux host path handler)
+      (if (procedure? handler)
+        (add-endpoint-to-http-mux! mux (make-endpoint (string-symbol path) path
+                                                      function: (lambda ()
+                                                                  (handler (current-http-request)
+                                                                           (current-http-response)))
+                                                      parameters: '()
+                                                      test: (lambda (req) (eqv? path (http-request-path)))))
+        (add-endpoint-to-http-mux! mux handler))))
+
+
+
+
+
+  (def current-endpoint-http-mux (make-parameter (make-endpoint-http-mux)))
+
+  (def (add-endpoint! endpoint
+                      mux: (current-endpoint-http-mux))
+
+
+
+  (defmethod {endpoint-matches? endpoint}
+    ;; => list of matching groups, or #f if no match
+    (lambda (self request)
+      ))
+
+  (defmethod {endpoint-dispatch endpoint}
+    (lambda (self request groups)
+      (let* ((context (endpoint-context self))
+             (fname (string->symbol
+                     (string-append
+                      (symbol->string (endpoint-name self))
+                      "/"
+                      (symbol->string (http-request-method request)))))
+             (exc #f)
+             (bound? (and (hash-get (expander-context-table (endpoint-context self)) fname)
+                          (try (eval fname context) (catch (e) (set! exc e) #f))))
+             (proc (and bound? (procedure? bound?))))
+
+        (cond (proc (apply proc groups))
+              (bound? (error (format "~A is not a procedure. Context: ~A"
+                                     fname (expander-context-id context))))
+              ((not bound?)
+               (error (format "~A is not bound in ~A. ~A"
+                              fname (expander-context-id context)
+                              (if exc (with-output-to-string (cut display-exception exc))
+                                  ""))))))))
+
+  (
+  (def fn #f)
+
+
+
+
+  (def (e404 res (message "Error : I can't figure it out"))
+    (http-response-write
+     res 404 '(("Content-Type" . "text/plain"))
+     message))
+
+
+  (import :std/net/httpd :std/test 
+   :std/net/request (only-in  :gerbil/gambit/exceptionsdisplay-exception))
+
+  (def (respond* body status: (code 200) :headers (headers '())
+                    response: (res (current-http-response)))
+    (http-response-write res code headers body))
+
+  (def (test/get pre post)
+    (respond* (string-append pre post)))
+
+  (def endpoint-tes
+    (lambda _ ;test-suite
+     "test :drewc/ftw/endpoint"
+
+     (def server-address
+       "127.0.0.1:9666")
+     (display server-address)
+     (def server-url
+       (string-append "http://" server-address))
+
+     (def mux (make-endpoint-http-mux))
+
+     (def httpd
+       (start-http-server! server-address mux: mux))
+
+     (add-endpoint-to-http-mux! mux (make-endpoint 'test "(.*)test(.*)"))
+
+
+     (stop-http-server! httpd)))
+
+
+#+end_src
+#+begin_src gerbil 
+  (import :std/net/httpd/mux :std/net/httpd :std/misc/sync :std/pregexp :gerbil/expander :std/sugar :std/format :std/srfi/95 :std/iter)
+
+
+  (defstruct endpoint (name match priority
+                            context groups test function)
+    constructor: :init!)
+
+  (defmethod {:init! endpoint}
+    (lambda (self name match
+             priority: (priority 10)
+             function: (function endpoint-request-function)
+             parameters: (parameters endpoint-request-function-parameters)
+             context: (context (gx#current-expander-context))
+             test: (test #t))
+      (struct-instance-init! self name match priority
+                             context parameters test function)))
+
+  (def (endpoint-request-function endpoint request)
+      (let* ((context (endpoint-context endpoint))
+             (fname (string->symbol
+                     (string-append
+                      (symbol->string (endpoint-name endpoint))
+                      "/"
+                      (symbol->string (http-request-method request)))))
+             (exception #f)
+             (bound (try (##eval fname context) (catch (e) (set! exception e) #f)))
+             (proc (if (and bound (procedure? bound))
+                     bound
+                     #f)))
+
+        (cond (proc proc)
+              (bound (error (format "~A is not a procedure. Context: ~A"
+                                     fname (expander-context-id context))))
+              ((not bound)
+               (error (format "~A is not bound in context: ~A. ~A"
+                              fname (expander-context-id context)
+                              (if exception (with-output-to-string (cut display-exception
+                                                                     exception))
+                                  "")))))))
+
+  (def (endpoint-request-function-parameters endpoint request)
+    (let (groups (pregexp-match (endpoint-match endpoint)
+                                (http-request-path request)))
+      (if groups
+        (cdr groups)
+        #f)))
+
+  (def (make-endpoint-dispatch-function endpoint)
+    (let* ((test (endpoint-test endpoint))
+           (params-as-test? (eq? test #t))
+           (params (cut endpoint-request-function-parameters endpoint <>))
+           (function (cut endpoint-request-function endpoint <>))
+           (test? (if params-as-test?
+                    params
+                    test)))
+      (lambda (request)
+        (let* ((results (test? request))
+               (dispatch-to (when results (function request)))
+               (args (when results
+                       (if params-as-test?
+                         results
+                         (params results)))))
+          (if (not results)
+            #f
+            (begin0 #t
+              (apply dispatch-to args)))))))
+
+
+
+  (defstruct endpoint-http-mux (endpoints queue)
+    constructor: :init!)
+
+  (defmethod {:init! endpoint-http-mux}
+    (lambda (self)
+      (struct-instance-init! self (make-sync-hash (make-hash-table)) '())))
+
+
+  (def current-http-request
+    (make-parameter #f))
+
+  (def current-http-response
+    (make-parameter #f))
+
+  (def (endpoint-hash endpoint)
+    (string->symbol (string-append
+                     (symbol->string
+                      (expander-context-id (endpoint-context endpoint)))
+                     "::"
+                     (with-output-to-string
+                       (cut display (endpoint-name endpoint))))))
+
+  (def (make-endpoint-http-mux-queue mux)
+    (let (q (sync-hash-do (endpoint-http-mux-endpoints mux)
+                          (lambda (t) (for/collect ((values k v) (in-hash t)) v))))
+      (map make-endpoint-dispatch-function (sort q < endpoint-priority))))
+
+  (def (add-endpoint-to-http-mux! mux endpoint)
+    (let (hash (endpoint-hash endpoint))
+      (begin0 hash (sync-hash-put! (endpoint-http-mux-endpoints mux)
+                    hash 
+                    endpoint)
+              (set! (endpoint-http-mux-queue mux) (make-endpoint-http-mux-queue mux)))))
+
+  (def (endpoint-http-mux-request-handler mux)
+    (lambda (req res)
+      (parameterize ((current-http-request req)
+                     (current-http-response res))
+        (try 
+         (let handle-request ((q (endpoint-http-mux-queue mux)))
+           (if (null? q)
+             (error "Cannot find handler for " (http-request-path req))
+             (let (dispatched? ((car q) req))
+               (or dispatched? (handle-request (cdr q))))))
+        (catch (e)
+          (http-response-write
+           res 500 (format "Endpoint Error: ~A"
+                           (with-output-to-string (cut display-exception e)))))))))
+
+  (defmethod {get-handler endpoint-http-mux}
+    (lambda (mux . _) (endpoint-http-mux-request-handler mux)))
+
+  (defmethod {put-handler! endpoint-http-mux}
+    (lambda (mux host path handler)
+      (if (procedure? handler)
+        (add-endpoint-to-http-mux! mux (make-endpoint (string-symbol path) path
+                                                      function: (lambda ()
+                                                                  (handler (current-http-request)
+                                                                           (current-http-response)))
+                                                      parameters: '()
+                                                      test: (lambda (req) (eqv? path (http-request-path)))))
+        (add-endpoint-to-http-mux! mux handler))))
+
+
+
+
+
+  (def current-endpoint-http-mux (make-parameter (make-endpoint-http-mux)))
+
+  (def (add-endpoint! endpoint
+                      mux: (current-endpoint-http-mux))
+
+
+
+  (defmethod {endpoint-matches? endpoint}
+    ;; => list of matching groups, or #f if no match
+    (lambda (self request)
+      ))
+
+  (defmethod {endpoint-dispatch endpoint}
+    (lambda (self request groups)
+      (let* ((context (endpoint-context self))
+             (fname (string->symbol
+                     (string-append
+                      (symbol->string (endpoint-name self))
+                      "/"
+                      (symbol->string (http-request-method request)))))
+             (exc #f)
+             (bound? (and (hash-get (expander-context-table (endpoint-context self)) fname)
+                          (try (eval fname context) (catch (e) (set! exc e) #f))))
+             (proc (and bound? (procedure? bound?))))
+
+        (cond (proc (apply proc groups))
+              (bound? (error (format "~A is not a procedure. Context: ~A"
+                                     fname (expander-context-id context))))
+              ((not bound?)
+               (error (format "~A is not bound in ~A. ~A"
+                              fname (expander-context-id context)
+                              (if exc (with-output-to-string (cut display-exception exc))
+                                  ""))))))))
+
+  (
+  (def fn #f)
+
+
+
+
+  (def (e404 res (message "Error : I can't figure it out"))
+    (http-response-write
+     res 404 '(("Content-Type" . "text/plain"))
+     message))
+
+
+  (import :std/net/httpd :std/test 
+   :std/net/request (only-in  :gerbil/gambit/exceptionsdisplay-exception))
+
+  (def (respond* body status: (code 200) :headers (headers '())
+                    response: (res (current-http-response)))
+    (http-response-write res code headers body))
+
+  (def (test/get pre post)
+    (respond* (string-append pre post)))
+
+  (def endpoint-tes
+    (lambda _ ;test-suite
+     "test :drewc/ftw/endpoint"
+
+     (def server-address
+       "127.0.0.1:9666")
+     (display server-address)
+     (def server-url
+       (string-append "http://" server-address))
+
+     (def mux (make-endpoint-http-mux))
+
+     (def httpd
+       (start-http-server! server-address mux: mux))
+
+     (add-endpoint-to-http-mux! mux (make-endpoint 'test "(.*)test(.*)"))
+
+
+     (stop-http-server! httpd)))
+
+
+#+end_src
+#+begin_src gerbil 
+  (import :std/net/httpd/mux :std/net/httpd :std/misc/sync :std/pregexp :gerbil/expander :std/sugar :std/format :std/srfi/95 :std/iter)
+
+
+  (defstruct endpoint (name match priority
+                            context groups test function)
+    constructor: :init!)
+
+  (defmethod {:init! endpoint}
+    (lambda (self name match
+             priority: (priority 10)
+             function: (function endpoint-request-function)
+             parameters: (parameters endpoint-request-function-parameters)
+             context: (context (gx#current-expander-context))
+             test: (test #t))
+      (struct-instance-init! self name match priority
+                             context parameters test function)))
+
+  (def (endpoint-request-function endpoint request)
+      (let* ((context (endpoint-context endpoint))
+             (fname (string->symbol
+                     (string-append
+                      (symbol->string (endpoint-name endpoint))
+                      "/"
+                      (symbol->string (http-request-method request)))))
+             (exception #f)
+             (bound (try (##eval fname context) (catch (e) (set! exception e) #f)))
+             (proc (if (and bound (procedure? bound))
+                     bound
+                     #f)))
+
+        (cond (proc proc)
+              (bound (error (format "~A is not a procedure. Context: ~A"
+                                     fname (expander-context-id context))))
+              ((not bound)
+               (error (format "~A is not bound in context: ~A. ~A"
+                              fname (expander-context-id context)
+                              (if exception (with-output-to-string (cut display-exception
+                                                                     exception))
+                                  "")))))))
+
+  (def (endpoint-request-function-parameters endpoint request)
+    (let (groups (pregexp-match (endpoint-match endpoint)
+                                (http-request-path request)))
+      (if groups
+        (cdr groups)
+        #f)))
+
+  (def (make-endpoint-dispatch-function endpoint)
+    (let* ((test (endpoint-test endpoint))
+           (params-as-test? (eq? test #t))
+           (params (cut endpoint-request-function-parameters endpoint <>))
+           (function (cut endpoint-request-function endpoint <>))
+           (test? (if params-as-test?
+                    params
+                    test)))
+      (lambda (request)
+        (let* ((results (test? request))
+               (dispatch-to (when results (function request)))
+               (args (when results
+                       (if params-as-test?
+                         results
+                         (params results)))))
+          (if (not results)
+            #f
+            (begin0 #t
+              (apply dispatch-to args)))))))
+
+
+
+  (defstruct endpoint-http-mux (endpoints queue)
+    constructor: :init!)
+
+  (defmethod {:init! endpoint-http-mux}
+    (lambda (self)
+      (struct-instance-init! self (make-sync-hash (make-hash-table)) '())))
+
+
+  (def current-http-request
+    (make-parameter #f))
+
+  (def current-http-response
+    (make-parameter #f))
+
+  (def (endpoint-hash endpoint)
+    (string->symbol (string-append
+                     (symbol->string
+                      (expander-context-id (endpoint-context endpoint)))
+                     "::"
+                     (with-output-to-string
+                       (cut display (endpoint-name endpoint))))))
+
+  (def (make-endpoint-http-mux-queue mux)
+    (let (q (sync-hash-do (endpoint-http-mux-endpoints mux)
+                          (lambda (t) (for/collect ((values k v) (in-hash t)) v))))
+      (map make-endpoint-dispatch-function (sort q < endpoint-priority))))
+
+  (def (add-endpoint-to-http-mux! mux endpoint)
+    (let (hash (endpoint-hash endpoint))
+      (begin0 hash (sync-hash-put! (endpoint-http-mux-endpoints mux)
+                    hash 
+                    endpoint)
+              (set! (endpoint-http-mux-queue mux) (make-endpoint-http-mux-queue mux)))))
+
+  (def (endpoint-http-mux-request-handler mux)
+    (lambda (req res)
+      (parameterize ((current-http-request req)
+                     (current-http-response res))
+        (try 
+         (let handle-request ((q (endpoint-http-mux-queue mux)))
+           (if (null? q)
+             (error "Cannot find handler for " (http-request-path req))
+             (let (dispatched? ((car q) req))
+               (or dispatched? (handle-request (cdr q))))))
+        (catch (e)
+          (http-response-write
+           res 500 (format "Endpoint Error: ~A"
+                           (with-output-to-string (cut display-exception e)))))))))
+
+  (defmethod {get-handler endpoint-http-mux}
+    (lambda (mux . _) (endpoint-http-mux-request-handler mux)))
+
+  (defmethod {put-handler! endpoint-http-mux}
+    (lambda (mux host path handler)
+      (if (procedure? handler)
+        (add-endpoint-to-http-mux! mux (make-endpoint (string-symbol path) path
+                                                      function: (lambda ()
+                                                                  (handler (current-http-request)
+                                                                           (current-http-response)))
+                                                      parameters: '()
+                                                      test: (lambda (req) (eqv? path (http-request-path)))))
+        (add-endpoint-to-http-mux! mux handler))))
+
+
+
+
+
+  (def current-endpoint-http-mux (make-parameter (make-endpoint-http-mux)))
+
+  (def (add-endpoint! endpoint
+                      mux: (current-endpoint-http-mux))
+
+
+
+  (defmethod {endpoint-matches? endpoint}
+    ;; => list of matching groups, or #f if no match
+    (lambda (self request)
+      ))
+
+  (defmethod {endpoint-dispatch endpoint}
+    (lambda (self request groups)
+      (let* ((context (endpoint-context self))
+             (fname (string->symbol
+                     (string-append
+                      (symbol->string (endpoint-name self))
+                      "/"
+                      (symbol->string (http-request-method request)))))
+             (exc #f)
+             (bound? (and (hash-get (expander-context-table (endpoint-context self)) fname)
+                          (try (eval fname context) (catch (e) (set! exc e) #f))))
+             (proc (and bound? (procedure? bound?))))
+
+        (cond (proc (apply proc groups))
+              (bound? (error (format "~A is not a procedure. Context: ~A"
+                                     fname (expander-context-id context))))
+              ((not bound?)
+               (error (format "~A is not bound in ~A. ~A"
+                              fname (expander-context-id context)
+                              (if exc (with-output-to-string (cut display-exception exc))
+                                  ""))))))))
+
+  (
+  (def fn #f)
+
+
+
+
+  (def (e404 res (message "Error : I can't figure it out"))
+    (http-response-write
+     res 404 '(("Content-Type" . "text/plain"))
+     message))
+
+
+  (import :std/net/httpd :std/test 
+   :std/net/request (only-in  :gerbil/gambit/exceptionsdisplay-exception))
+
+  (def (respond* body status: (code 200) :headers (headers '())
+                    response: (res (current-http-response)))
+    (http-response-write res code headers body))
+
+  (def (test/get pre post)
+    (respond* (string-append pre post)))
+
+  (def endpoint-tes
+    (lambda _ ;test-suite
+     "test :drewc/ftw/endpoint"
+
+     (def server-address
+       "127.0.0.1:9666")
+     (display server-address)
+     (def server-url
+       (string-append "http://" server-address))
+
+     (def mux (make-endpoint-http-mux))
+
+     (def httpd
+       (start-http-server! server-address mux: mux))
+
+     (add-endpoint-to-http-mux! mux (make-endpoint 'test "(.*)test(.*)"))
+
+
+     (stop-http-server! httpd)))
+
+
+#+end_src
